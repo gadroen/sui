@@ -354,31 +354,41 @@ where
         metrics: Arc<BridgeMetrics>,
     ) {
         info!("Starting run_onchain_execution_loop");
-        // Get token id maps
-        // let sui_token_type_tags = sui_client.get_token_id_map().await.unwrap();
-        let sui_token_type_tags = ArcSwap::new(Arc::new(token_config_rx.borrow().clone()));
-        info!("FIXME, start loop");
+        let sui_token_type_tags = ArcSwap::new(Arc::new(token_config_rx.borrow_and_update().clone()));
+
         loop {
             tokio::select! {
-                biased;
-
-                _ = token_config_rx.changed() => {
-                    sui_token_type_tags.store(Arc::new(token_config_rx.borrow().clone()));
+                result = token_config_rx.changed() => {
+                    match result {
+                        Ok(()) => {
+                            sui_token_type_tags.store(Arc::new(token_config_rx.borrow_and_update().clone()));
+                        }
+                        Err(_) => {
+                            panic!("Token config watch channel closed unexpectedly");
+                        }
+                    }
                 },
-                Some(certificate_wrapper) = execution_queue_receiver.recv() => {
-                    Self::handle_execution_task(
-                        certificate_wrapper,
-                        &sui_client,
-                        &sui_key,
-                        &sui_address,
-                        gas_object_id,
-                        &store,
-                        &execution_queue_sender,
-                        &bridge_object_arg,
-                        &sui_token_type_tags,
-                        &metrics,
-                    )
-                    .await;
+                certificate_wrapper = execution_queue_receiver.recv() => {
+                    match certificate_wrapper {
+                        Some(certificate_wrapper) => {
+                            Self::handle_execution_task(
+                                certificate_wrapper,
+                                &sui_client,
+                                &sui_key,
+                                &sui_address,
+                                gas_object_id,
+                                &store,
+                                &execution_queue_sender,
+                                &bridge_object_arg,
+                                &sui_token_type_tags,
+                                &metrics,
+                            )
+                            .await;
+                        },
+                        None => {
+                            panic!("Execution queue receiver closed unexpectedly");
+                        }
+                    }
                 }
             }
         }
@@ -636,6 +646,7 @@ mod tests {
             gas_object_ref,
             sui_address,
             id_token_map,
+            _token_tx,
         ) = setup().await;
 
         let (action_certificate, _, _) = get_bridge_authority_approved_action(
@@ -828,6 +839,7 @@ mod tests {
             gas_object_ref,
             sui_address,
             id_token_map,
+            _token_tx,
         ) = setup().await;
 
         let (action_certificate, sui_tx_digest, sui_tx_event_index) =
@@ -855,7 +867,6 @@ mod tests {
             gas_object_ref,
             Owner::AddressOwner(sui_address),
         );
-        println!("???");
         store.insert_pending_actions(&[action.clone()]).unwrap();
         assert_eq!(
             store.get_all_pending_actions()[&action.digest()],
@@ -863,27 +874,20 @@ mod tests {
         );
 
         // Kick it
-        println!("2222 ");
         submit_to_executor(&signing_tx, action.clone())
             .await
             .unwrap();
 
         // Wait until the transaction is retried at least once (instead of deing dropped)
         loop {
-            println!("333 ");
             let requested_times =
                 mock0.get_sui_token_events_requested(sui_tx_digest, sui_tx_event_index);
-            println!("444 ");
             if requested_times >= 2 {
-                println!("break ");
                 break;
             }
-            println!("bfore sleep ");
-            tokio::time::sleep(tokio::time::Duration::from_millis(40)).await;
-            println!("Waiting for retry: {}", requested_times);
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         }
         // Nothing is sent to execute yet
-        println!("555 ");
         assert_eq!(
             tx_subscription.try_recv().unwrap_err(),
             tokio::sync::broadcast::error::TryRecvError::Empty
@@ -956,6 +960,7 @@ mod tests {
             _gas_object_ref,
             _sui_address,
             _id_token_map,
+            _token_tx,
         ) = setup().await;
 
         let sui_tx_digest = TransactionDigest::random();
@@ -1023,6 +1028,7 @@ mod tests {
             gas_object_ref,
             sui_address,
             id_token_map,
+            _token_tx,
         ) = setup().await;
 
         let (action_certificate, _, _) = get_bridge_authority_approved_action(
@@ -1214,6 +1220,7 @@ mod tests {
         ObjectRef,
         SuiAddress,
         HashMap<u8, TypeTag>,
+        tokio::sync::watch::Sender<HashMap<u8, TypeTag>>,
     ) {
         telemetry_subscribers::init_for_testing();
         let registry = Registry::new();
@@ -1249,7 +1256,7 @@ mod tests {
         let agg = Arc::new(BridgeAuthorityAggregator::new(Arc::new(committee)));
         let metrics = Arc::new(BridgeMetrics::new(&registry));
         let sui_token_type_tags = sui_client.get_token_id_map().await.unwrap();
-        let (_token_type_tags_tx, token_type_tags_rx) =
+        let (token_type_tags_tx, token_type_tags_rx) =
             tokio::sync::watch::channel(sui_token_type_tags);
         let executor = BridgeActionExecutor::new(
             sui_client.clone(),
@@ -1289,6 +1296,7 @@ mod tests {
             gas_object_ref,
             sui_address,
             id_token_map,
+            token_type_tags_tx,
         )
     }
 }

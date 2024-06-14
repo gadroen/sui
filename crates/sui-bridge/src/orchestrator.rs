@@ -149,6 +149,7 @@ where
                         latest_token_config.entry(e.token_id)
                     {
                         entry.insert(e.type_name.clone());
+                        println!("@@@@@@@@@@@@@@@ New token type tag: {:?}", e.type_name);
                         token_type_tags_tx
                             .send(latest_token_config.clone())
                             .expect("Sending token type tag should not fail");
